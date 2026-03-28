@@ -1,0 +1,24 @@
+# ─────────────────────────────────────────────────────────────────
+# Live Performance Recording — Configuration
+# Edit these values to match your setup.
+# ─────────────────────────────────────────────────────────────────
+
+obs:
+  host: localhost
+  port: 4455
+  password: ""          # Leave empty if you didn't set a password in OBS
+
+ableton:
+  host: localhost
+  port: 11000           # AbletonOSC default (do not change unless you changed it in AbletonOSC)
+
+sessions:
+  # Where session folders are created. ~ expands to your home directory on
+  # both Windows and macOS.
+  base_path: ~/Music/recordings
+
+produce:
+  # Resolution of each grid cell. 960x540 → 1920x1080 total for 2x2 grid.
+  cell_resolution: "960x540"
+  video_crf: 18          # Lower = higher quality (18 is near-lossless)
+  audio_bitrate: "320k"

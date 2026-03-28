@@ -1,0 +1,27 @@
+# Session recordings (large media files — do not commit)
+recordings/
+sessions/
+*.mp4
+*.mkv
+*.wav
+*.aif
+*.aiff
+*.flac
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
