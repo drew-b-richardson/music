@@ -8,6 +8,7 @@ Global hotkeys (work regardless of which app is focused):
   r      — Start recording
   Space  — Stop recording
   t      — Tap tempo
+  m      — Toggle metronome
   x      — Export mix from Ableton (opens export dialog, path copied to clipboard)
   p      — Produce final video
   q      — Quit
@@ -60,6 +61,7 @@ state             = "IDLE"   # "IDLE" | "RECORDING"
 session_path      = None
 track_takes       = {}       # track_num (1-4) -> number of takes recorded so far
 armed_track       = None     # 0-indexed track number currently armed, or None
+metronome_on      = False
 transport_playing = False    # tracks whether Ableton transport is currently running
 
 # ── Connections ───────────────────────────────────────────────────────────────
@@ -236,7 +238,7 @@ def save_set_to_session():
         _PS_FOCUS_ABLETON +
         "$wsh.SendKeys('%f'); "                     # Alt+F — open File menu
         "Start-Sleep -Milliseconds 500; "
-        f"$wsh.SendKeys('{down_presses}'); "        # navigate to Collect All and Save
+        "$wsh.SendKeys('c'); "                      # jump to Collect All and Save by letter
         "Start-Sleep -Milliseconds 100; "
         "$wsh.SendKeys('~')"                        # Enter — confirm
     )
@@ -337,12 +339,11 @@ def on_press(key):
         arm_track(int(ch))
     elif ch == 't':
         osc.send_message("/live/song/tap_tempo", [])
-    elif ch == 's':
-        subprocess.Popen(
-            ["powershell", "-Command", _PS_FOCUS_ABLETON + "$wsh.SendKeys('^s')"],
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        print("  Ableton set saved.")
+    elif ch == 'm':
+        global metronome_on
+        metronome_on = not metronome_on
+        osc.send_message("/live/song/set/metronome", [int(metronome_on)])
+        print(f"  Metronome {'on' if metronome_on else 'off'}.")
     elif ch == 'x':
         export_mix()
     elif ch == 'p':
