@@ -22,3 +22,4 @@ produce:
   cell_resolution: "960x540"
   video_crf: 18          # Lower = higher quality (18 is near-lossless)
   audio_bitrate: "320k"
+  av_offset: 0.5         # Seconds to delay audio relative to video (increase if audio is ahead)

@@ -33,8 +33,18 @@ with open(CONFIG_PATH) as f:
 CELL_RES      = config["produce"]["cell_resolution"]   # e.g. "960x540"
 VIDEO_CRF     = str(config["produce"]["video_crf"])
 AUDIO_BITRATE = config["produce"]["audio_bitrate"]
+AV_OFFSET     = float(config["produce"].get("av_offset", 0))
 
 CELL_W, CELL_H = (int(x) for x in CELL_RES.split("x"))
+
+
+def audio_input(mix: pathlib.Path) -> list:
+    """Return FFmpeg args for the audio input, with offset applied if set."""
+    args = []
+    if AV_OFFSET != 0:
+        args += ["-itsoffset", str(AV_OFFSET)]
+    args += ["-i", str(mix)]
+    return args
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -67,7 +77,7 @@ def build_1(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     """1 take: audio replacement only, no re-encode of video."""
     run_ffmpeg([
         "-i", str(takes[0]),
-        "-i", str(mix),
+        *audio_input(mix),
         "-c:v", "copy",
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
@@ -84,7 +94,7 @@ def build_2(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     scale_filters = ";".join(scale_filter(i) for i in range(2))
     filter_complex = f"{scale_filters};[v0][v1]hstack=inputs=2[vout]"
     run_ffmpeg(
-        inputs + ["-i", str(mix),
+        inputs + audio_input(mix) + [
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "2:a",
@@ -102,10 +112,7 @@ def build_3(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     inputs = [arg for t in takes for arg in ("-i", str(t))]
     total_w = CELL_W * 2
 
-    # Scale all three cells
     scale_filters = ";".join(scale_filter(i) for i in range(3))
-    # Top row: hstack takes 0 and 1
-    # Bottom row: pad take 2 to total_w so vstack works
     filter_complex = (
         f"{scale_filters};"
         f"[v0][v1]hstack=inputs=2[top];"
@@ -113,7 +120,7 @@ def build_3(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
         f"[top][bot]vstack=inputs=2[vout]"
     )
     run_ffmpeg(
-        inputs + ["-i", str(mix),
+        inputs + audio_input(mix) + [
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "3:a",
@@ -136,7 +143,7 @@ def build_4(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
         f"[v0][v1][v2][v3]xstack=inputs=4:layout={layout}[vout]"
     )
     run_ffmpeg(
-        inputs + ["-i", str(mix),
+        inputs + audio_input(mix) + [
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "4:a",
