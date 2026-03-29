@@ -267,16 +267,24 @@ def save_set_to_session():
         subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
 
     else:  # macOS
-        # Typing a full path in the Save As filename field navigates + saves —
-        # more reliable than Cmd+Shift+G which can fail in Ableton's file picker.
+        # Navigate to the session folder via Cmd+Shift+G (Go to Folder), then
+        # type just the filename — typing a full path as the filename causes
+        # Ableton's file picker to treat slashes as literal filename characters.
+        folder_path = str(session_path)
+        filename    = set_filename
         script_save_as = (
             _mac_focus_ableton_script() +
             'tell application "System Events"\n'
             '  tell process "Live"\n'
             '    keystroke "s" using {command down, shift down}\n'  # Save As
             '    delay 1.5\n'
-            '    keystroke "a" using {command down}\n'              # select filename field
-            f'    keystroke "{set_path}"\n'                         # type full path
+            '    keystroke "g" using {command down, shift down}\n'  # Go to Folder
+            '    delay 0.8\n'
+            f'    keystroke "{folder_path}"\n'                      # type folder path
+            '    keystroke return\n'                                 # navigate
+            '    delay 0.8\n'
+            '    keystroke "a" using {command down}\n'              # select filename
+            f'    keystroke "{filename}"\n'                         # type filename only
             '    keystroke return\n'
             '  end tell\n'
             'end tell\n'
