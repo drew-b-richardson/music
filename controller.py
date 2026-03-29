@@ -28,6 +28,9 @@ from pynput import keyboard
 import obsws_python as obs
 from pythonosc.osc_message_builder import OscMessageBuilder
 
+IS_MACOS   = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
 # ── Load config ──────────────────────────────────────────────────────────────
 
 CONFIG_PATH = pathlib.Path(__file__).parent / "config.yaml"
@@ -42,17 +45,34 @@ ABL_HOST           = config["ableton"]["host"]
 ABL_PORT           = config["ableton"]["port"]
 ABL_COLLECT_STEPS  = int(config["ableton"].get("collect_menu_steps", 7))
 
-# PowerShell snippet that finds the Ableton Live window by process title and
-# activates it by PID — more reliable than AppActivate("Ableton") which does
-# a partial title match and can grab whichever editor or app is also running.
-_PS_FOCUS_ABLETON = (
-    "$proc = Get-Process | Where-Object { $_.MainWindowTitle -like '*Ableton Live*' } "
-    "| Select-Object -First 1; "
-    "if (-not $proc) { Write-Error 'Ableton Live not found'; exit 1 }; "
-    "$wsh = New-Object -ComObject WScript.Shell; "
-    "$wsh.AppActivate($proc.Id); "
-    "Start-Sleep -Milliseconds 500; "
-)
+# ── Platform-specific window/automation helpers ───────────────────────────────
+
+if IS_WINDOWS:
+    # PowerShell snippet that finds the Ableton Live window by process title and
+    # activates it by PID — more reliable than AppActivate("Ableton") which does
+    # a partial title match and can grab whichever editor or app is also running.
+    _PS_FOCUS_ABLETON = (
+        "$proc = Get-Process | Where-Object { $_.MainWindowTitle -like '*Ableton Live*' } "
+        "| Select-Object -First 1; "
+        "if (-not $proc) { Write-Error 'Ableton Live not found'; exit 1 }; "
+        "$wsh = New-Object -ComObject WScript.Shell; "
+        "$wsh.AppActivate($proc.Id); "
+        "Start-Sleep -Milliseconds 500; "
+    )
+
+
+
+def _mac_focus_ableton_script():
+    """AppleScript fragment that brings the Ableton Live process to front."""
+    return (
+        'tell application "System Events"\n'
+        '  set liveProc to first application process whose name is "Live"\n'
+        '  set frontmost of liveProc to true\n'
+        '  delay 0.5\n'
+        'end tell\n'
+    )
+
+
 BASE_PATH    = pathlib.Path(config["sessions"]["base_path"]).expanduser()
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -213,111 +233,72 @@ def save_set_to_session():
     set_filename = session_path.name + ".als"
     set_path = str(session_path / set_filename)
 
-    # Escape WScript SendKeys special characters in the path
-    escaped = set_path
-    for ch in "{}+^%~()":
-        escaped = escaped.replace(ch, "{" + ch + "}")
-
-    down_presses = "{DOWN " + str(ABL_COLLECT_STEPS) + "}"
-
     print(f"  Saving Ableton set → {set_filename}")
-    ps_cmd = (
-        # ── Step 1: Save As ──────────────────────────────────────────────────
-        _PS_FOCUS_ABLETON +
-        "$wsh.SendKeys('^+s'); "                    # Ctrl+Shift+S — Save As
-        "Start-Sleep -Milliseconds 1000; "          # wait for dialog to open
-        "$wsh.SendKeys('^a'); "                     # select any existing filename text
-        f"$wsh.SendKeys('{escaped}'); "             # type full destination path
-        "Start-Sleep -Milliseconds 200; "
-        "$wsh.SendKeys('~'); "                      # Enter — confirm save
 
-        # ── Step 2: Collect All and Save ─────────────────────────────────────
-        # Wait for Save As to fully complete, then use File menu to collect
-        # all referenced audio into the session folder.
-        "Start-Sleep -Milliseconds 2000; " +
-        _PS_FOCUS_ABLETON +
-        "$wsh.SendKeys('%f'); "                     # Alt+F — open File menu
-        "Start-Sleep -Milliseconds 500; "
-        "$wsh.SendKeys('c'); "                      # jump to Collect All and Save by letter
-        "Start-Sleep -Milliseconds 100; "
-        "$wsh.SendKeys('~')"                        # Enter — confirm
-    )
-    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+    if IS_WINDOWS:
+        # Escape WScript SendKeys special characters in the path
+        escaped = set_path
+        for ch in "{}+^%~()":
+            escaped = escaped.replace(ch, "{" + ch + "}")
+
+        down_presses = "{DOWN " + str(ABL_COLLECT_STEPS) + "}"
+
+        ps_cmd = (
+            # ── Step 1: Save As ──────────────────────────────────────────────────
+            _PS_FOCUS_ABLETON +
+            "$wsh.SendKeys('^+s'); "                    # Ctrl+Shift+S — Save As
+            "Start-Sleep -Milliseconds 1000; "          # wait for dialog to open
+            "$wsh.SendKeys('^a'); "                     # select any existing filename text
+            f"$wsh.SendKeys('{escaped}'); "             # type full destination path
+            "Start-Sleep -Milliseconds 200; "
+            "$wsh.SendKeys('~'); "                      # Enter — confirm save
+
+            # ── Step 2: Collect All and Save ─────────────────────────────────────
+            # Wait for Save As to fully complete, then use File menu to collect
+            # all referenced audio into the session folder.
+            "Start-Sleep -Milliseconds 2000; " +
+            _PS_FOCUS_ABLETON +
+            "$wsh.SendKeys('%f'); "                     # Alt+F — open File menu
+            "Start-Sleep -Milliseconds 500; "
+            "$wsh.SendKeys('c'); "                      # jump to Collect All and Save by letter
+            "Start-Sleep -Milliseconds 100; "
+            "$wsh.SendKeys('~')"                        # Enter — confirm
+        )
+        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+
+    else:  # macOS
+        # Typing a full path in the Save As filename field navigates + saves —
+        # more reliable than Cmd+Shift+G which can fail in Ableton's file picker.
+        script_save_as = (
+            _mac_focus_ableton_script() +
+            'tell application "System Events"\n'
+            '  tell process "Live"\n'
+            '    keystroke "s" using {command down, shift down}\n'  # Save As
+            '    delay 1.5\n'
+            '    keystroke "a" using {command down}\n'              # select filename field
+            f'    keystroke "{set_path}"\n'                         # type full path
+            '    keystroke return\n'
+            '  end tell\n'
+            'end tell\n'
+        )
+        subprocess.run(["osascript", "-e", script_save_as], capture_output=True)
+        time.sleep(2.0)
+
+        # Step 2: File → Collect All and Save (addressed by menu name — no key-nav needed)
+        script_collect = (
+            _mac_focus_ableton_script() +
+            'tell application "System Events"\n'
+            '  tell process "Live"\n'
+            '    click menu item "Collect All and Save" of menu "File" of menu bar 1\n'
+            '    delay 1.0\n'
+            '    keystroke return\n'  # confirm any dialog
+            '  end tell\n'
+            'end tell\n'
+        )
+        subprocess.run(["osascript", "-e", script_collect], capture_output=True)
+
     print(f"  Ableton set saved and audio collected.")
 
-
-def export_mix():
-    if state == "RECORDING":
-        print("  [!] Stop the current recording first (Space).")
-        return
-
-    mix_path = session_path / "mix.wav"
-    print(f"\n  ♪ Export target: {mix_path}")
-    print(f"    (folder path copied to clipboard — paste it in Ableton's export dialog)")
-
-    # Copy the session folder path to clipboard so it can be pasted in the file dialog
-    subprocess.run(["powershell", "-Command", f"Set-Clipboard -Value '{session_path}'"],
-                   capture_output=True)
-
-    # Focus Ableton by PID and send Ctrl+Shift+R — runs in a separate process
-    # so the keystroke is never seen by pynput's listener
-    subprocess.Popen(
-        ["powershell", "-Command",
-         _PS_FOCUS_ABLETON +
-         "$wsh.SendKeys('^+r')"],
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-
-    print(f"    Ableton export dialog opened.")
-    print(f"    Paste the path, set format to WAV, then click Export.")
-
-
-def produce():
-    global session_path, track_takes
-
-    if state == "RECORDING":
-        print("  [!] Stop the current recording first (Space).")
-        return
-
-    if not track_takes:
-        print("  [!] No takes recorded in this session yet.")
-        return
-
-    mix_path = session_path / "mix.wav"
-    if not mix_path.exists():
-        for ext in ("aif", "aiff", "flac", "mp3"):
-            candidate = session_path / f"mix.{ext}"
-            if candidate.exists():
-                mix_path = candidate
-                break
-    if not mix_path.exists():
-        print(f"  [!] Mix audio not found.")
-        print(f"      Export your Ableton session to:  {session_path / 'mix.wav'}")
-        print(f"      Then press p again.")
-        return
-
-    track_summary = ", ".join(
-        f"track{t}_take{track_takes[t]}" for t in sorted(track_takes)
-    )
-    print(f"\n  ► Producing final video using: {track_summary}")
-    try:
-        subprocess.run(
-            [sys.executable, str(pathlib.Path(__file__).parent / "produce.py"),
-             str(session_path)],
-            check=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"  [ERROR] Production failed (exit code {e.returncode}). Check FFmpeg output above.")
-        return
-
-    outputs = sorted(session_path.glob("final_*.mp4"), key=lambda p: p.stat().st_mtime)
-    if outputs:
-        print(f"\n  Done!  Output: {outputs[-1]}")
-    else:
-        print("  Production complete.")
-
-    print("\n  Goodbye.")
-    sys.exit(0)
 
 
 # ── Keyboard listener ─────────────────────────────────────────────────────────
@@ -344,10 +325,6 @@ def on_press(key):
         metronome_on = not metronome_on
         osc.send_message("/live/song/set/metronome", [int(metronome_on)])
         print(f"  Metronome {'on' if metronome_on else 'off'}.")
-    elif ch == 'x':
-        export_mix()
-    elif ch == 'p':
-        produce()
     elif ch == 'q':
         print("\n  Goodbye.")
         return False
@@ -379,9 +356,6 @@ if __name__ == "__main__":
     print("    r      — Start recording")
     print("    Space  — Stop recording / toggle playback")
     print("    t      — Tap tempo")
-    print("    s      — Save Ableton set")
-    print("    x      — Export mix from Ableton")
-    print("    p      — Produce final video")
     print("    q      — Quit")
     print()
 

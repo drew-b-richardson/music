@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-produce.py — Build the final grid video from session takes + Ableton mix audio.
+produce.py — Build the final grid video from session takes + mix audio.
 
 Usage:
-    python produce.py <session_folder>
+    python produce.py [session_folder]
+
+If session_folder is omitted, the most recent session under base_path
+(from config.yaml) is used automatically.
 
 The session folder must contain files named track{N}_take{M}.mp4 for tracks 1-4.
 For each track the latest take (highest M) is used. At least one track is required.
-    mix.wav     (required — Ableton export)
+mix.wav (or .aif/.aiff/.flac/.mp3) is optional — omit for video-only output.
 
 Output:
     <session_folder>/final_<timestamp>.mp4
@@ -71,7 +74,7 @@ def run_ffmpeg(args: list[str]):
 # ── Grid builders ──────────────────────────────────────────────────────────────
 
 def build_1(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
-    """1 take: audio replacement only, no re-encode of video."""
+    """1 take: replace audio with mix, copy video stream."""
     run_ffmpeg([
         "-i", str(takes[0]),
         *audio_input(mix),
@@ -108,7 +111,6 @@ def build_3(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     """3 takes: 2 on top row, 1 centred on bottom row (padded to full width)."""
     inputs = [arg for t in takes for arg in ("-i", str(t))]
     total_w = CELL_W * 2
-
     scale_filters = ";".join(scale_filter(i) for i in range(3))
     filter_complex = (
         f"{scale_filters};"
@@ -159,16 +161,24 @@ BUILDERS = {1: build_1, 2: build_2, 3: build_3, 4: build_4}
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: python {pathlib.Path(__file__).name} <session_folder>")
-        sys.exit(1)
-
     check_ffmpeg()
 
-    session = pathlib.Path(sys.argv[1]).expanduser().resolve()
-    if not session.is_dir():
-        print(f"[ERROR] Session folder not found: {session}")
-        sys.exit(1)
+    if len(sys.argv) >= 2:
+        session = pathlib.Path(sys.argv[1]).expanduser().resolve()
+        if not session.is_dir():
+            print(f"[ERROR] Session folder not found: {session}")
+            sys.exit(1)
+    else:
+        base = pathlib.Path(config["sessions"]["base_path"]).expanduser()
+        candidates = sorted(
+            (p for p in base.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if not candidates:
+            print(f"[ERROR] No session folders found in {base}")
+            sys.exit(1)
+        session = candidates[-1]
+        print(f"  Auto-selected session: {session.name}")
 
     # Find the latest take for each track (track1_take*.mp4, track2_take*.mp4, ...)
     takes = []
@@ -186,17 +196,16 @@ def main():
         print(f"[ERROR] No take files (track1_take*.mp4 …) found in: {session}")
         sys.exit(1)
 
-    # Find mix audio
-    mix = session / "mix.wav"
-    if not mix.exists():
-        # Also accept .aif / .aiff / .flac
-        for ext in ("aif", "aiff", "flac", "mp3"):
-            candidate = session / f"mix.{ext}"
-            if candidate.exists():
-                mix = candidate
-                break
-    if not mix.exists():
-        print(f"[ERROR] Mix audio not found. Export from Ableton to: {session / 'mix.wav'}")
+    # Find mix audio (required)
+    mix = None
+    for ext in ("wav", "aif", "aiff", "flac", "mp3"):
+        candidate = session / f"mix.{ext}"
+        if candidate.exists():
+            mix = candidate
+            break
+    if not mix:
+        print(f"[ERROR] Mix audio not found in {session}")
+        print(f"        Export from Ableton and save as mix.wav in that folder.")
         sys.exit(1)
 
     n = len(takes)
