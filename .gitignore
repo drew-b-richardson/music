@@ -28,3 +28,5 @@ Thumbs.db
 
 # Local config
 settings.local.json
+memory/MEMORY.md
+memory/feedback_popen_capture_output.md
