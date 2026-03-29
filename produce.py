@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/drew/repos/music/.venv/bin/python3
 """
 produce.py — Build the final grid video from session takes + mix audio.
 
