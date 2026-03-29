@@ -5,11 +5,8 @@ produce.py — Build the final grid video from session takes + Ableton mix audio
 Usage:
     python produce.py <session_folder>
 
-The session folder must contain:
-    take_1.mp4  (required)
-    take_2.mp4  (optional)
-    take_3.mp4  (optional)
-    take_4.mp4  (optional)
+The session folder must contain files named track{N}_take{M}.mp4 for tracks 1-4.
+For each track the latest take (highest M) is used. At least one track is required.
     mix.wav     (required — Ableton export)
 
 Output:
@@ -173,18 +170,20 @@ def main():
         print(f"[ERROR] Session folder not found: {session}")
         sys.exit(1)
 
-    # Find takes
-    takes = sorted(
-        (p for p in (session / f"take_{i}.mp4" for i in range(1, 5)) if p.exists())
-    )
-    if not takes:
-        # Also accept .mkv in case OBS was set to MKV
-        takes = sorted(
-            (p for p in (session / f"take_{i}.mkv" for i in range(1, 5)) if p.exists())
-        )
+    # Find the latest take for each track (track1_take*.mp4, track2_take*.mp4, ...)
+    takes = []
+    for track_num in range(1, 5):
+        for ext in ("mp4", "mkv"):
+            candidates = sorted(
+                session.glob(f"track{track_num}_take*.{ext}"),
+                key=lambda p: int(p.stem.split("_take")[1]) if "_take" in p.stem else 0,
+            )
+            if candidates:
+                takes.append(candidates[-1])
+                break
 
     if not takes:
-        print(f"[ERROR] No take files (take_1.mp4 … take_4.mp4) found in: {session}")
+        print(f"[ERROR] No take files (track1_take*.mp4 …) found in: {session}")
         sys.exit(1)
 
     # Find mix audio

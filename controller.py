@@ -37,16 +37,30 @@ with open(CONFIG_PATH) as f:
 OBS_HOST     = config["obs"]["host"]
 OBS_PORT     = config["obs"]["port"]
 OBS_PASSWORD = config["obs"]["password"]
-ABL_HOST     = config["ableton"]["host"]
-ABL_PORT     = config["ableton"]["port"]
+ABL_HOST           = config["ableton"]["host"]
+ABL_PORT           = config["ableton"]["port"]
+ABL_COLLECT_STEPS  = int(config["ableton"].get("collect_menu_steps", 7))
+
+# PowerShell snippet that finds the Ableton Live window by process title and
+# activates it by PID — more reliable than AppActivate("Ableton") which does
+# a partial title match and can grab whichever editor or app is also running.
+_PS_FOCUS_ABLETON = (
+    "$proc = Get-Process | Where-Object { $_.MainWindowTitle -like '*Ableton Live*' } "
+    "| Select-Object -First 1; "
+    "if (-not $proc) { Write-Error 'Ableton Live not found'; exit 1 }; "
+    "$wsh = New-Object -ComObject WScript.Shell; "
+    "$wsh.AppActivate($proc.Id); "
+    "Start-Sleep -Milliseconds 500; "
+)
 BASE_PATH    = pathlib.Path(config["sessions"]["base_path"]).expanduser()
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
-state        = "IDLE"   # "IDLE" | "RECORDING"
-session_path = None
-take_count   = 0
-armed_track  = None     # 0-indexed track number currently armed, or None
+state             = "IDLE"   # "IDLE" | "RECORDING"
+session_path      = None
+track_takes       = {}       # track_num (1-4) -> number of takes recorded so far
+armed_track       = None     # 0-indexed track number currently armed, or None
+transport_playing = False    # tracks whether Ableton transport is currently running
 
 # ── Connections ───────────────────────────────────────────────────────────────
 
@@ -97,8 +111,20 @@ def arm_track(track_num):
     print(f"  Track {track_num} armed")
 
 
+def toggle_transport():
+    global transport_playing
+    if transport_playing:
+        osc.send_message("/live/song/stop_playing", [])
+        transport_playing = False
+        print("  ■ Playback stopped")
+    else:
+        osc.send_message("/live/song/start_playing", [])
+        transport_playing = True
+        print("  ► Playback started")
+
+
 def start_take():
-    global state, session_path, take_count
+    global state, track_takes, transport_playing
 
     if state != "IDLE":
         return
@@ -107,15 +133,9 @@ def start_take():
         print("  [!] No track armed — press 1-4 to select a track first.")
         return
 
-    # Create session folder on first take
-    if session_path is None:
-        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        session_path = BASE_PATH / ts
-        session_path.mkdir(parents=True, exist_ok=True)
-        print(f"\n  Session folder: {session_path}")
-
-    take_num = take_count + 1
-    print(f"\n  ● Take {take_num} (track {armed_track + 1}) — starting...")
+    track_num = armed_track + 1
+    take_num  = track_takes.get(track_num, 0) + 1
+    print(f"\n  ● Track {track_num}, take {take_num} — starting...")
 
     # Tell OBS where to save this recording
     try:
@@ -141,17 +161,19 @@ def start_take():
     osc.send_message("/live/song/start_playing", [])
 
     state = "RECORDING"
-    print(f"  ● Take {take_num} recording — press Space to stop")
+    transport_playing = True
+    print(f"  ● Track {track_num}, take {take_num} recording — press Space to stop")
 
 
 def stop_take():
-    global state, take_count
+    global state, track_takes, transport_playing
 
     if state != "RECORDING":
         return
 
-    take_num = take_count + 1
-    print(f"\n  ■ Stopping take {take_num}...")
+    track_num = armed_track + 1
+    take_num  = track_takes.get(track_num, 0) + 1
+    print(f"\n  ■ Stopping track {track_num}, take {take_num}...")
 
     # Stop Ableton first so audio ends cleanly before video stops
     osc.send_message("/live/song/stop_playing", [])
@@ -159,11 +181,11 @@ def stop_take():
     # Small buffer so Ableton finishes writing
     time.sleep(0.2)
 
-    # Stop OBS and rename the output file to take_N.mp4
+    # Stop OBS and rename the output file to track{N}_take{M}.mp4
     try:
         result = obs_client.stop_record()
         output_path = pathlib.Path(result.output_path)
-        dest = session_path / f"take_{take_num}.mp4"
+        dest = session_path / f"track{track_num}_take{take_num}.mp4"
         for _ in range(10):
             try:
                 output_path.rename(dest)
@@ -175,35 +197,71 @@ def stop_take():
     except Exception as e:
         print(f"  [ERROR] OBS stop/rename failed: {e}")
 
-    take_count += 1
+    track_takes[track_num] = take_num
     state = "IDLE"
-    print(f"  ■ Take {take_num} complete.")
+    transport_playing = False
+    print(f"  ■ Track {track_num}, take {take_num} saved as: track{track_num}_take{take_num}.mp4")
     print(f"     Press r to record another take, or p to produce the final video.")
+
+
+def save_set_to_session():
+    """Save the Ableton set into the session folder and collect all audio there.
+    Uses Save As to move the project, then Collect All and Save to copy audio clips.
+    Blocking — completes before recording starts so Ableton is free when OBS rolls."""
+    set_filename = session_path.name + ".als"
+    set_path = str(session_path / set_filename)
+
+    # Escape WScript SendKeys special characters in the path
+    escaped = set_path
+    for ch in "{}+^%~()":
+        escaped = escaped.replace(ch, "{" + ch + "}")
+
+    down_presses = "{DOWN " + str(ABL_COLLECT_STEPS) + "}"
+
+    print(f"  Saving Ableton set → {set_filename}")
+    ps_cmd = (
+        # ── Step 1: Save As ──────────────────────────────────────────────────
+        _PS_FOCUS_ABLETON +
+        "$wsh.SendKeys('^+s'); "                    # Ctrl+Shift+S — Save As
+        "Start-Sleep -Milliseconds 1000; "          # wait for dialog to open
+        "$wsh.SendKeys('^a'); "                     # select any existing filename text
+        f"$wsh.SendKeys('{escaped}'); "             # type full destination path
+        "Start-Sleep -Milliseconds 200; "
+        "$wsh.SendKeys('~'); "                      # Enter — confirm save
+
+        # ── Step 2: Collect All and Save ─────────────────────────────────────
+        # Wait for Save As to fully complete, then use File menu to collect
+        # all referenced audio into the session folder.
+        "Start-Sleep -Milliseconds 2000; " +
+        _PS_FOCUS_ABLETON +
+        "$wsh.SendKeys('%f'); "                     # Alt+F — open File menu
+        "Start-Sleep -Milliseconds 500; "
+        f"$wsh.SendKeys('{down_presses}'); "        # navigate to Collect All and Save
+        "Start-Sleep -Milliseconds 100; "
+        "$wsh.SendKeys('~')"                        # Enter — confirm
+    )
+    subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True)
+    print(f"  Ableton set saved and audio collected.")
 
 
 def export_mix():
     if state == "RECORDING":
         print("  [!] Stop the current recording first (Space).")
         return
-    if session_path is None:
-        print("  [!] No session active — record a take first.")
-        return
 
     mix_path = session_path / "mix.wav"
     print(f"\n  ♪ Export target: {mix_path}")
-    print(f"    (path copied to clipboard — paste it in Ableton's export dialog)")
+    print(f"    (folder path copied to clipboard — paste it in Ableton's export dialog)")
 
-    # Copy the session path to clipboard so it can be pasted in the file dialog
-    subprocess.run(["powershell", "-Command", f"Set-Clipboard -Value '{mix_path}'"],
+    # Copy the session folder path to clipboard so it can be pasted in the file dialog
+    subprocess.run(["powershell", "-Command", f"Set-Clipboard -Value '{session_path}'"],
                    capture_output=True)
 
-    # Focus Ableton and send Ctrl+Shift+R via PowerShell — runs in a separate
-    # process so the keystroke is never seen by pynput's listener
+    # Focus Ableton by PID and send Ctrl+Shift+R — runs in a separate process
+    # so the keystroke is never seen by pynput's listener
     subprocess.Popen(
         ["powershell", "-Command",
-         "$wsh = New-Object -ComObject WScript.Shell; "
-         "$wsh.AppActivate('Ableton'); "
-         "Start-Sleep -Milliseconds 300; "
+         _PS_FOCUS_ABLETON +
          "$wsh.SendKeys('^+r')"],
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
@@ -213,13 +271,13 @@ def export_mix():
 
 
 def produce():
-    global session_path, take_count
+    global session_path, track_takes
 
     if state == "RECORDING":
         print("  [!] Stop the current recording first (Space).")
         return
 
-    if session_path is None or take_count == 0:
+    if not track_takes:
         print("  [!] No takes recorded in this session yet.")
         return
 
@@ -236,7 +294,10 @@ def produce():
         print(f"      Then press p again.")
         return
 
-    print(f"\n  ► Producing final video from {take_count} take(s)...")
+    track_summary = ", ".join(
+        f"track{t}_take{track_takes[t]}" for t in sorted(track_takes)
+    )
+    print(f"\n  ► Producing final video using: {track_summary}")
     try:
         subprocess.run(
             [sys.executable, str(pathlib.Path(__file__).parent / "produce.py"),
@@ -253,9 +314,8 @@ def produce():
     else:
         print("  Production complete.")
 
-    session_path = None
-    take_count = 0
-    print("  Session cleared — ready to start a new session (press r).")
+    print("\n  Goodbye.")
+    sys.exit(0)
 
 
 # ── Keyboard listener ─────────────────────────────────────────────────────────
@@ -265,7 +325,10 @@ def on_press(key):
         ch = key.char
     except AttributeError:
         if key == keyboard.Key.space:
-            stop_take()
+            if state == "RECORDING":
+                stop_take()
+            else:
+                toggle_transport()
         return
 
     if ch == 'r':
@@ -274,6 +337,12 @@ def on_press(key):
         arm_track(int(ch))
     elif ch == 't':
         osc.send_message("/live/song/tap_tempo", [])
+    elif ch == 's':
+        subprocess.Popen(
+            ["powershell", "-Command", _PS_FOCUS_ABLETON + "$wsh.SendKeys('^s')"],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        print("  Ableton set saved.")
     elif ch == 'x':
         export_mix()
     elif ch == 'p':
@@ -295,12 +364,21 @@ if __name__ == "__main__":
     obs_client = connect_obs()
     osc        = make_osc_client()
     print(f"  Ableton OSC client ready  ({ABL_HOST}:{ABL_PORT})")
+
+    # Create session folder and save Ableton set into it immediately
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    session_path = BASE_PATH / ts
+    session_path.mkdir(parents=True, exist_ok=True)
+    print(f"\n  Session folder: {session_path}")
+    save_set_to_session()
+
     print()
     print("  Ready.  Hotkeys:")
     print("    1-4    — Arm track")
     print("    r      — Start recording")
-    print("    Space  — Stop recording")
+    print("    Space  — Stop recording / toggle playback")
     print("    t      — Tap tempo")
+    print("    s      — Save Ableton set")
     print("    x      — Export mix from Ableton")
     print("    p      — Produce final video")
     print("    q      — Quit")

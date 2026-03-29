@@ -11,6 +11,10 @@ obs:
 ableton:
   host: localhost
   port: 11000           # AbletonOSC default (do not change unless you changed it in AbletonOSC)
+  # Number of Down-arrow presses to reach "Collect All and Save" in Ableton's File menu.
+  # In Live 11/12 this is typically 7 (separators are skipped during navigation).
+  # If the wrong menu item is selected, adjust up or down by 1.
+  collect_menu_steps: 7
 
 sessions:
   # Where session folders are created. ~ expands to your home directory on
