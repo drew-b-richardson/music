@@ -34,8 +34,10 @@ CELL_RES      = config["produce"]["cell_resolution"]   # e.g. "960x540"
 VIDEO_CRF     = str(config["produce"]["video_crf"])
 AUDIO_BITRATE = config["produce"]["audio_bitrate"]
 AV_OFFSET     = float(config["produce"].get("av_offset", 0))
+FADE_DUR      = float(config["produce"].get("fade_duration", 0))
 
 CELL_W, CELL_H = (int(x) for x in CELL_RES.split("x"))
+CELL_GAP       = int(config["produce"].get("cell_gap", 0))
 
 
 def audio_input(mix: pathlib.Path) -> list:
@@ -45,6 +47,32 @@ def audio_input(mix: pathlib.Path) -> list:
         args += ["-itsoffset", str(AV_OFFSET)]
     args += ["-i", str(mix)]
     return args
+
+
+def get_duration(path: pathlib.Path) -> float:
+    """Return duration of a media file in seconds via ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def video_fade_filter(in_label: str, out_label: str, duration: float) -> str:
+    """Filter chain segment that adds fade in/out to a video stream."""
+    fade_out_st = max(0.0, duration - FADE_DUR)
+    return (
+        f"[{in_label}]fade=t=in:st=0:d={FADE_DUR},"
+        f"fade=t=out:st={fade_out_st:.3f}:d={FADE_DUR}"
+        f"[{out_label}]"
+    )
+
+
+def audio_fade_args(duration: float) -> list:
+    """FFmpeg -af args for audio fade in/out."""
+    fade_out_st = max(0.0, duration - FADE_DUR)
+    return ["-af", f"afade=t=in:st=0:d={FADE_DUR},afade=t=out:st={fade_out_st:.3f}:d={FADE_DUR}"]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -58,8 +86,13 @@ def check_ffmpeg():
 
 
 def scale_filter(idx: int) -> str:
-    """Return an ffmpeg scale filter string that forces a take to CELL_RES."""
-    return f"[{idx}:v]scale={CELL_W}:{CELL_H}:force_original_aspect_ratio=decrease,pad={CELL_W}:{CELL_H}:(ow-iw)/2:(oh-ih)/2[v{idx}]"
+    """Scale a take to CELL_RES, leaving CELL_GAP pixels of black on each side."""
+    inner_w = CELL_W - CELL_GAP * 2
+    inner_h = CELL_H - CELL_GAP * 2
+    return (
+        f"[{idx}:v]scale={inner_w}:{inner_h}:force_original_aspect_ratio=decrease,"
+        f"pad={CELL_W}:{CELL_H}:(ow-iw)/2:(oh-ih)/2:black[v{idx}]"
+    )
 
 
 def run_ffmpeg(args: list[str]):
@@ -73,86 +106,87 @@ def run_ffmpeg(args: list[str]):
 
 # ── Grid builders ──────────────────────────────────────────────────────────────
 
-def build_1(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
-    """1 take: replace audio with mix, copy video stream."""
-    run_ffmpeg([
-        "-i", str(takes[0]),
-        *audio_input(mix),
-        "-c:v", "copy",
+def build(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path,
+          filter_complex_fn, n_video_inputs: int):
+    """Shared builder: constructs inputs, filter_complex, and runs ffmpeg."""
+    inputs = [arg for t in takes for arg in ("-i", str(t))]
+    dur = get_duration(mix) if FADE_DUR > 0 else None
+    scales = ";".join(scale_filter(i) for i in range(len(takes)))
+    filter_complex = filter_complex_fn(scales, dur)
+    run_ffmpeg(
+        inputs + audio_input(mix) + [
+        "-filter_complex", filter_complex,
+        "-map", "[vout]",
+        "-map", f"{n_video_inputs}:a",
+        "-c:v", "libx264",
+        "-crf", VIDEO_CRF,
         "-c:a", "aac",
         "-b:a", AUDIO_BITRATE,
-        "-map", "0:v:0",
-        "-map", "1:a:0",
         "-shortest",
+        *(audio_fade_args(dur) if dur is not None else []),
         str(out),
     ])
+
+
+def build_1(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
+    """1 take: replace audio with mix."""
+    if FADE_DUR == 0:
+        run_ffmpeg([
+            "-i", str(takes[0]),
+            *audio_input(mix),
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", AUDIO_BITRATE,
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-shortest", str(out),
+        ])
+        return
+
+    def fc(scales, dur):
+        if dur:
+            return f"{scales};{video_fade_filter('v0', 'vout', dur)}"
+        return f"{scales};[v0]copy[vout]"
+
+    build(takes, mix, out, fc, n_video_inputs=1)
 
 
 def build_2(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     """2 takes: side by side (hstack)."""
-    inputs = [arg for t in takes for arg in ("-i", str(t))]
-    scale_filters = ";".join(scale_filter(i) for i in range(2))
-    filter_complex = f"{scale_filters};[v0][v1]hstack=inputs=2[vout]"
-    run_ffmpeg(
-        inputs + audio_input(mix) + [
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "2:a",
-        "-c:v", "libx264",
-        "-crf", VIDEO_CRF,
-        "-c:a", "aac",
-        "-b:a", AUDIO_BITRATE,
-        "-shortest",
-        str(out),
-    ])
+    def fc(scales, dur):
+        stacked = "vstack" if dur else "vout"
+        s = f"{scales};[v0][v1]hstack=inputs=2[{stacked}]"
+        if dur:
+            s += f";{video_fade_filter(stacked, 'vout', dur)}"
+        return s
+    build(takes, mix, out, fc, n_video_inputs=2)
 
 
 def build_3(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
-    """3 takes: 2 on top row, 1 centred on bottom row (padded to full width)."""
-    inputs = [arg for t in takes for arg in ("-i", str(t))]
+    """3 takes: 2 on top row, 1 centred on bottom row."""
     total_w = CELL_W * 2
-    scale_filters = ";".join(scale_filter(i) for i in range(3))
-    filter_complex = (
-        f"{scale_filters};"
-        f"[v0][v1]hstack=inputs=2[top];"
-        f"[v2]pad={total_w}:{CELL_H}:(ow-iw)/2:0[bot];"
-        f"[top][bot]vstack=inputs=2[vout]"
-    )
-    run_ffmpeg(
-        inputs + audio_input(mix) + [
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "3:a",
-        "-c:v", "libx264",
-        "-crf", VIDEO_CRF,
-        "-c:a", "aac",
-        "-b:a", AUDIO_BITRATE,
-        "-shortest",
-        str(out),
-    ])
+    def fc(scales, dur):
+        stacked = "vstack" if dur else "vout"
+        s = (
+            f"{scales};"
+            f"[v0][v1]hstack=inputs=2[top];"
+            f"[v2]pad={total_w}:{CELL_H}:(ow-iw)/2:0[bot];"
+            f"[top][bot]vstack=inputs=2[{stacked}]"
+        )
+        if dur:
+            s += f";{video_fade_filter(stacked, 'vout', dur)}"
+        return s
+    build(takes, mix, out, fc, n_video_inputs=3)
 
 
 def build_4(takes: list[pathlib.Path], mix: pathlib.Path, out: pathlib.Path):
     """4 takes: 2x2 grid via xstack."""
-    inputs = [arg for t in takes for arg in ("-i", str(t))]
-    scale_filters = ";".join(scale_filter(i) for i in range(4))
     layout = "0_0|w0_0|0_h0|w0_h0"
-    filter_complex = (
-        f"{scale_filters};"
-        f"[v0][v1][v2][v3]xstack=inputs=4:layout={layout}[vout]"
-    )
-    run_ffmpeg(
-        inputs + audio_input(mix) + [
-        "-filter_complex", filter_complex,
-        "-map", "[vout]",
-        "-map", "4:a",
-        "-c:v", "libx264",
-        "-crf", VIDEO_CRF,
-        "-c:a", "aac",
-        "-b:a", AUDIO_BITRATE,
-        "-shortest",
-        str(out),
-    ])
+    def fc(scales, dur):
+        stacked = "vstack" if dur else "vout"
+        s = f"{scales};[v0][v1][v2][v3]xstack=inputs=4:layout={layout}[{stacked}]"
+        if dur:
+            s += f";{video_fade_filter(stacked, 'vout', dur)}"
+        return s
+    build(takes, mix, out, fc, n_video_inputs=4)
 
 
 BUILDERS = {1: build_1, 2: build_2, 3: build_3, 4: build_4}

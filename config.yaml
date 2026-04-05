@@ -24,6 +24,8 @@ sessions:
 produce:
   # Resolution of each grid cell. 960x540 → 1920x1080 total for 2x2 grid.
   cell_resolution: "960x540"
+  cell_gap: 8                # Pixels of black margin around each cell (0 to disable)
   video_crf: 18          # Lower = higher quality (18 is near-lossless)
   audio_bitrate: "320k"
   av_offset: 0.5         # Seconds to delay audio relative to video (increase if audio is ahead)
+  fade_duration: 1.0     # Seconds for fade in/out (set to 0 to disable)
